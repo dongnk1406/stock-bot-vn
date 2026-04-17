@@ -52,9 +52,16 @@ async def compute_daily_signals(ticker: str) -> Optional[dict]:
         macd_diff = ta.trend.MACD(close=close).macd_diff()
 
         crossover_days = None
+        bearish_crossover_days = None
         for i in range(1, 5):
-            if len(macd_diff) > i and macd_diff.iloc[-i] > 0 and macd_diff.iloc[-i - 1] <= 0:
+            if len(macd_diff) <= i:
+                break
+            cur, prev = macd_diff.iloc[-i], macd_diff.iloc[-i - 1]
+            if crossover_days is None and cur > 0 and prev <= 0:
                 crossover_days = i
+            if bearish_crossover_days is None and cur < 0 and prev >= 0:
+                bearish_crossover_days = i
+            if crossover_days is not None and bearish_crossover_days is not None:
                 break
 
         vol_avg20 = float(volume.iloc[-20:].mean())
@@ -67,6 +74,7 @@ async def compute_daily_signals(ticker: str) -> Optional[dict]:
             "rsi": round(float(rsi.iloc[-1]), 2),
             "macd_diff": round(float(macd_diff.iloc[-1]), 4),
             "macd_crossover_days": crossover_days,
+            "macd_bearish_crossover_days": bearish_crossover_days,
             "volume_today": float(volume.iloc[-1]),
             "volume_avg20": vol_avg20,
             "volume_ratio": round(float(volume.iloc[-1]) / vol_avg20, 2) if vol_avg20 > 0 else 0,

@@ -75,8 +75,7 @@ def format_buy_message(ticker: str, technical: dict, sentiment: dict, conditions
         f"   • Trailing stop: Dời stop về hoà vốn khi lãi +3%\n\n"
         f"{'─'*34}\n"
         f"⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM: Đây chỉ là gợi ý tham khảo dựa trên phân tích kỹ thuật và AI, "
-        f"KHÔNG phải lời khuyên đầu tư tài chính. Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm. "
-        f"Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+        f"KHÔNG phải lời khuyên đầu tư tài chính. Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
     )
 
 

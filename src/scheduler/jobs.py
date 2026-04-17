@@ -4,20 +4,53 @@ import logging
 from datetime import datetime, timezone, timedelta
 import pytz
 from telegram import Bot
-from src.config import MARKET_TZ
+from telegram.error import NetworkError, TimedOut, RetryAfter
+from src.config import (
+    MARKET_TZ, VN30_TICKERS,
+    RSI_MIN, RSI_MAX, MACD_LOOKBACK_DAYS, VOLUME_MULTIPLIER,
+)
 from src.models.database import get_pool
 from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
 from src.scraper.macro import fetch_global_macro, fetch_rss_news
-from src.scraper.dedup import is_duplicate, mark_processed
+from src.scraper.dedup import is_duplicate, mark_processed, prune_old_news
 from src.engine.technical import compute_daily_signals, compute_1h_signals
-from src.engine.sentiment import analyze_sentiment
+from src.engine.sentiment import analyze_sentiment, generate_daily_recap
 from src.engine.decision import (
     check_buy_signal, check_sell_signals,
     format_buy_message, format_watchlist_status, format_conclusion,
 )
+from src.engine.market_index import fetch_index_snapshot, fetch_top_movers
 
 logger = logging.getLogger(__name__)
 _consecutive_failures = 0
+
+
+async def _safe_send(bot: Bot, chat_id: int, text: str, parse_mode: str | None = None,
+                     max_attempts: int = 3) -> bool:
+    """Send a Telegram message with retry on transient network errors.
+
+    Non-retryable errors (Forbidden, BadRequest) log and return False — usually a
+    user has blocked the bot or the message payload is invalid; retrying won't help.
+    """
+    for attempt in range(max_attempts):
+        try:
+            kwargs = {"chat_id": chat_id, "text": text}
+            if parse_mode:
+                kwargs["parse_mode"] = parse_mode
+            await bot.send_message(**kwargs)
+            return True
+        except RetryAfter as e:
+            await asyncio.sleep(getattr(e, "retry_after", 5) + 1)
+        except (NetworkError, TimedOut) as e:
+            if attempt == max_attempts - 1:
+                logger.error(f"Telegram send to {chat_id} failed after {max_attempts} attempts: {e}")
+                return False
+            logger.warning(f"Telegram send retry {attempt + 1}/{max_attempts} to {chat_id}: {e}")
+            await asyncio.sleep(2 ** attempt)
+        except Exception as e:
+            logger.error(f"Telegram send to {chat_id} failed (non-retryable): {e}")
+            return False
+    return False
 
 # Per-cycle pacing. Gemini free tier = 5 req/min => 13s spacing (matches sentiment.py).
 SECONDS_PER_TICKER = 13
@@ -160,13 +193,11 @@ async def _deliver_to_subscriber(
     else:
         macro_text = "  ⚠️ Không lấy được dữ liệu vĩ mô (Yahoo Finance tạm thời không phản hồi)"
 
-    await bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"🕐 CẬP NHẬT THỊ TRƯỜNG — {now}\n"
-            f"{'─'*34}\n"
-            f"🌍 Vĩ mô toàn cầu:\n{macro_text}"
-        ),
+    await _safe_send(
+        bot, chat_id,
+        f"🕐 CẬP NHẬT THỊ TRƯỜNG — {now}\n"
+        f"{'─'*34}\n"
+        f"🌍 Vĩ mô toàn cầu:\n{macro_text}",
     )
 
     all_results: list[tuple] = []
@@ -180,9 +211,9 @@ async def _deliver_to_subscriber(
             return
         prefix = "📊 *DANH MỤC THEO DÕI:*\n\n" if not header_sent else ""
         suffix = f"\n\n_Đã gửi {done}/{total}..._" if done < total else ""
-        await bot.send_message(
-            chat_id=chat_id,
-            text=prefix + "\n\n".join(batch_lines) + suffix,
+        await _safe_send(
+            bot, chat_id,
+            prefix + "\n\n".join(batch_lines) + suffix,
             parse_mode="Markdown",
         )
         header_sent = True
@@ -207,13 +238,13 @@ async def _deliver_to_subscriber(
 
     if all_results:
         conclusion = format_conclusion(all_results, portfolio_value)
-        await bot.send_message(chat_id=chat_id, text=conclusion, parse_mode="Markdown")
+        await _safe_send(bot, chat_id, conclusion, parse_mode="Markdown")
 
     for ticker, technical, sentiment, conditions in all_results:
         if conditions["signal"] and portfolio_value > 0:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=format_buy_message(ticker, technical, sentiment, conditions, portfolio_value),
+            await _safe_send(
+                bot, chat_id,
+                format_buy_message(ticker, technical, sentiment, conditions, portfolio_value),
             )
 
     await _check_exit_signals(bot, chat_id)
@@ -235,14 +266,12 @@ async def _check_exit_signals(bot: Bot, chat_id: int) -> None:
             result = check_sell_signals(signals, entry_price)
             for alert_type, message in result["alerts"]:
                 emoji = "🚨" if alert_type == "stop_loss" else "⚠️"
-                await bot.send_message(
-                    chat_id=chat_id,
-                    text=(
-                        f"{emoji} *{ticker}* — {message}\n"
-                        f"Giá hiện tại: {result['price']:,.0f} VNĐ | Giá vào: {entry_price:,.0f} VNĐ\n\n"
-                        f"⚠️ _Đây chỉ là gợi ý tham khảo, không phải lời khuyên tài chính. "
-                        f"Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm._"
-                    ),
+                await _safe_send(
+                    bot, chat_id,
+                    f"{emoji} *{ticker}* — {message}\n"
+                    f"Giá hiện tại: {result['price']:,.0f} VNĐ | Giá vào: {entry_price:,.0f} VNĐ\n\n"
+                    f"⚠️ _Đây chỉ là gợi ý tham khảo, không phải lời khuyên tài chính. "
+                    f"Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm._",
                     parse_mode="Markdown",
                 )
         except Exception as e:
@@ -254,10 +283,7 @@ async def _broadcast_alert(bot: Bot, message: str) -> None:
     async with pool.acquire() as conn:
         subscribers = await conn.fetch("SELECT chat_id FROM subscribers WHERE is_active = TRUE")
     for sub in subscribers:
-        try:
-            await bot.send_message(chat_id=sub["chat_id"], text=message)
-        except Exception:
-            pass
+        await _safe_send(bot, sub["chat_id"], message)
 
 
 def _next_delivery_slot(now: datetime) -> datetime:
@@ -281,6 +307,231 @@ def _next_delivery_slot(now: datetime) -> datetime:
         if candidate > local:
             return candidate
         candidate += timedelta(minutes=30)
+
+
+def _next_daily_recap_slot(now: datetime) -> datetime:
+    """Return next Mon–Fri 16:00 ICT after `now`."""
+    tz = pytz.timezone(MARKET_TZ)
+    local = now.astimezone(tz)
+    candidate = local.replace(hour=16, minute=0, second=0, microsecond=0)
+    if candidate <= local:
+        candidate += timedelta(days=1)
+    while candidate.weekday() >= 5:  # skip Sat/Sun
+        candidate += timedelta(days=1)
+    return candidate
+
+
+RSI_OVERBOUGHT_DAILY = 70
+SELL_LOOKBACK_DAYS = 3
+
+
+def _passes_buy_technicals(tech: dict) -> bool:
+    """The 4 purely-technical conditions from check_buy_signal (no sentiment)."""
+    return (
+        tech["price"] > tech["ma20"] > tech["ma50"]
+        and RSI_MIN <= tech["rsi"] <= RSI_MAX
+        and tech.get("macd_crossover_days") is not None
+        and tech["macd_crossover_days"] <= MACD_LOOKBACK_DAYS
+        and tech["volume_ratio"] >= VOLUME_MULTIPLIER
+    )
+
+
+def _sell_reasons(tech: dict) -> list[str]:
+    """Daily technical-breakdown flags. Any one triggers a caution."""
+    reasons: list[str] = []
+    if tech["price"] < tech["ma20"]:
+        reasons.append("trend_break")
+    if tech["rsi"] > RSI_OVERBOUGHT_DAILY:
+        reasons.append("overbought")
+    bearish = tech.get("macd_bearish_crossover_days")
+    if bearish is not None and bearish <= SELL_LOOKBACK_DAYS:
+        reasons.append("macd_bearish")
+    return reasons
+
+
+async def _scan_vn30(macro_data: dict, macro_news: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Single-pass VN30 scan: fetch daily technicals once, derive buy + sell lists.
+
+    Buy side: the 5-condition check_buy_signal rule (technical gate → Gemini sentiment
+    only for tech passers → composite threshold).
+
+    Sell side: daily technical breakdown flags — price broke below MA20, RSI(14) > 70,
+    or MACD bearish crossover within the last 3 days. No Gemini cost.
+    """
+    technicals = await asyncio.gather(
+        *[compute_daily_signals(t) for t in VN30_TICKERS],
+        return_exceptions=True,
+    )
+
+    tech_map: dict[str, dict] = {
+        t: v for t, v in zip(VN30_TICKERS, technicals) if isinstance(v, dict)
+    }
+
+    # Sell flags: pure technicals, no Gemini.
+    sell_flags: list[dict] = []
+    for ticker, tech in tech_map.items():
+        reasons = _sell_reasons(tech)
+        if reasons:
+            sell_flags.append({
+                "ticker": ticker,
+                "price": tech["price"],
+                "ma20": tech["ma20"],
+                "rsi": tech["rsi"],
+                "macd_bearish_days": tech.get("macd_bearish_crossover_days"),
+                "reasons": reasons,
+            })
+
+    # Buy side: filter by technicals first, then run Gemini sentiment only on passers.
+    tech_passers = [(t, v) for t, v in tech_map.items() if _passes_buy_technicals(v)]
+    buy_candidates: list[dict] = []
+    if tech_passers:
+        logger.info(f"Recap buy scan: {len(tech_passers)} tech passers — running sentiment.")
+        for ticker, tech in tech_passers:
+            try:
+                ticker_news = await fetch_ticker_news(ticker, limit=3)
+            except Exception:
+                ticker_news = []
+            sentiment = await analyze_sentiment(ticker, ticker_news, macro_news, macro_data)
+            conditions = check_buy_signal(tech, sentiment)
+            if conditions["signal"]:
+                buy_candidates.append({
+                    "ticker": ticker,
+                    "price": tech["price"],
+                    "ma20": tech["ma20"],
+                    "ma50": tech["ma50"],
+                    "rsi": tech["rsi"],
+                    "macd_crossover_days": tech["macd_crossover_days"],
+                    "volume_ratio": tech["volume_ratio"],
+                    "composite_score": sentiment["composite_score"],
+                    "ticker_reason": sentiment.get("ticker_reason", ""),
+                })
+    else:
+        logger.info("Recap buy scan: 0 VN30 tickers passed technical gates.")
+
+    logger.info(
+        f"Recap scan result: {len(buy_candidates)} buy candidates, {len(sell_flags)} sell flags."
+    )
+    return buy_candidates, sell_flags
+
+
+async def daily_market_recap(bot: Bot) -> str:
+    """Build end-of-day market recap and broadcast to active subscribers."""
+    tz = pytz.timezone(MARKET_TZ)
+    trade_date = datetime.now(tz).strftime("%A %d/%m/%Y")
+
+    logger.info("Daily recap: fetching market data...")
+    indices, movers, macro_data, macro_news, rss_news = await asyncio.gather(
+        fetch_index_snapshot(),
+        fetch_top_movers(top_n=5),
+        fetch_global_macro(),
+        fetch_macro_news(limit=8),
+        fetch_rss_news(limit=5),
+    )
+
+    # Ticker-level news: pool news for the top movers (union of gainers + losers).
+    mover_tickers = list({r["ticker"] for r in (movers.get("gainers", []) + movers.get("losers", []))})[:6]
+    news_results = await asyncio.gather(
+        *[fetch_ticker_news(t, limit=2) for t in mover_tickers],
+        return_exceptions=True,
+    )
+    ticker_news: list[dict] = []
+    for t, result in zip(mover_tickers, news_results):
+        if isinstance(result, list):
+            ticker_news.extend(result)
+        else:
+            logger.warning(f"Recap ticker news fetch failed {t}: {result}")
+
+    all_macro_news = (macro_news or []) + (rss_news or [])
+
+    logger.info("Daily recap: running codified buy+sell scan over VN30...")
+    buy_candidates, sell_flags = await _scan_vn30(macro_data, all_macro_news)
+
+    logger.info("Daily recap: composing report via Gemini...")
+    recap_md = await generate_daily_recap(
+        indices=indices,
+        movers=movers,
+        macro_data=macro_data,
+        macro_news=all_macro_news,
+        ticker_news=ticker_news,
+        trade_date=trade_date,
+        buy_candidates=buy_candidates,
+        sell_flags=sell_flags,
+    )
+
+    header = f"📊 *TỔNG KẾT PHIÊN — {trade_date}*\n{'─'*34}\n\n"
+    body = header + recap_md
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT chat_id FROM subscribers WHERE is_active = TRUE AND is_paused = FALSE"
+        )
+    chat_ids = [r["chat_id"] for r in rows]
+
+    for chat_id in chat_ids:
+        try:
+            await _send_chunked(bot, chat_id, body)
+        except Exception as e:
+            logger.error(f"Recap delivery failed for {chat_id}: {e}")
+
+    logger.info(f"Daily recap delivered to {len(chat_ids)} chat(s).")
+
+    try:
+        pruned = await prune_old_news(days=30)
+        if pruned:
+            logger.info(f"Pruned {pruned} processed_news rows older than 30 days.")
+    except Exception as e:
+        logger.warning(f"processed_news prune failed: {e}")
+
+    return recap_md
+
+
+async def _send_chunked(bot: Bot, chat_id: int, text: str, limit: int = 3800) -> None:
+    """Telegram caps messages at 4096 chars; split on paragraph boundaries.
+
+    Uses _safe_send (retries transient errors) with a Markdown-then-plaintext
+    fallback for LLM-produced content that may have malformed syntax.
+    """
+    async def _try_send(payload: str) -> None:
+        if not await _safe_send(bot, chat_id, payload, parse_mode="Markdown"):
+            await _safe_send(bot, chat_id, payload)
+
+    if len(text) <= limit:
+        await _try_send(text)
+        return
+    chunks: list[str] = []
+    buf = ""
+    for para in text.split("\n\n"):
+        if len(buf) + len(para) + 2 > limit:
+            if buf:
+                chunks.append(buf)
+            buf = para
+        else:
+            buf = f"{buf}\n\n{para}" if buf else para
+    if buf:
+        chunks.append(buf)
+    for chunk in chunks:
+        await _try_send(chunk)
+
+
+async def daily_recap_loop(bot: Bot) -> None:
+    """Sleep until next Mon–Fri 16:00 ICT, emit recap, repeat."""
+    while True:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            next_slot = _next_daily_recap_slot(now_utc)
+            wait = (next_slot - now_utc).total_seconds()
+            logger.info(f"Next daily recap at {next_slot:%Y-%m-%d %H:%M %Z} (in {wait/3600:.1f}h).")
+            if wait > 0:
+                await asyncio.sleep(wait)
+            await daily_market_recap(bot)
+        except asyncio.CancelledError:
+            logger.info("Daily recap loop cancelled.")
+            raise
+        except Exception as e:
+            logger.error(f"Daily recap loop error: {e}")
+            # Back off briefly before re-computing the next slot.
+            await asyncio.sleep(60)
 
 
 async def analysis_loop(bot: Bot) -> None:

@@ -1,10 +1,11 @@
 # Stock Bot VN
 
-AI-powered Telegram bot for Vietnamese stock market analysis. Monitors news, runs sentiment analysis via Google Gemini, and combines technical indicators to deliver hourly Buy/Sell suggestions directly to your Telegram.
+AI-powered Telegram bot for Vietnamese stock market analysis. Monitors news, runs sentiment analysis via Google Gemini 2.5 Flash, and combines technical indicators to deliver hourly Buy/Sell suggestions directly to your Telegram.
 
 ## Features
 
 - Hourly market updates (weekdays 8:00–15:00 ICT)
+- Daily end-of-day market recap at 16:00 ICT (weekdays) — indices, highlight events, sector leaders, buy/sell calls
 - Two-layer AI sentiment scoring: ticker-specific (60%) + macro (40%)
 - Technical signals: RSI, MACD, MA20/MA50, Volume breakout
 - Triple-layer exit strategy: hard stop-loss, technical exit, trailing stop
@@ -19,7 +20,7 @@ AI-powered Telegram bot for Vietnamese stock market analysis. Monitors news, run
 |---|---|
 | Language | Python 3.9+ (async) |
 | Bot | python-telegram-bot 21 |
-| AI | Google Gemini 2.0 Flash |
+| AI | Google Gemini 2.5 Flash (override via `GEMINI_MODEL` env var) |
 | Market Data | vnstock |
 | Technical Analysis | ta (RSI, MACD, SMA, Bollinger) |
 | News Scraping | httpx + BeautifulSoup4 |
@@ -92,6 +93,7 @@ pkill -f "python main.py"
 | `/buy [TICKER] [PRICE]` | Record a buy entry for exit monitoring — e.g. `/buy HPG 27000` |
 | `/sell [TICKER]` | Close a position — e.g. `/sell HPG` |
 | `/check [TICKER]` | Run full analysis on a ticker now — e.g. `/check HPG` |
+| `/news` / `/news [TICKER]` | Latest macro news, or news for a specific ticker |
 
 ## Buy Signal Logic
 
@@ -113,6 +115,23 @@ Monitoring starts after you record a buy with `/buy`. Three independent triggers
 | Technical Exit | RSI(1H) > 75 or bearish MACD(1H) crossover | Profit-taking alert |
 | Trailing Stop | Price reaches +3% from entry | Suggest moving stop to break-even |
 
+## Daily Market Recap (4:00 PM ICT)
+
+Every weekday at 16:00 ICT (~75 min after the ATC close at 14:45), the bot broadcasts an end-of-day report to every active subscriber. Broadcast-only (no on-demand command) to protect the Gemini quota.
+
+Pipeline:
+
+1. **Data gathering (parallel)** — VN-Index / VN30 / HNX-Index / UPCOM-Index OHLC via `vnstock`, top gainers/losers (with a VN30 fallback), global macro (DXY / S&P 500 / Gold / Oil), macro news (CafeF + RSS), and news for each top-mover ticker.
+2. **Codified VN30 buy/sell scan** — a single pass over the VN30 computes daily technicals once, then derives:
+   - **Buy candidates** — tickers passing the full 5-condition rule (trend, RSI 45–65, MACD crossover, volume, AI sentiment > 0.6). Gemini sentiment is only called for tech-passers to keep it fast.
+   - **Sell flags** — tickers showing daily technical breakdown: price below MA20, RSI(14) > 70 (overbought), or MACD bearish crossover in the last 3 days. No Gemini cost.
+3. **Single Gemini call** composes a concise Vietnamese Markdown report with four sections: *Sự kiện nổi bật*, *Diễn biến chỉ số*, *Ngành & cổ phiếu dẫn dắt*, *Khuyến nghị mua / bán*. Recommendations must quote the pre-computed buy/sell lists — Gemini cannot add tickers outside them.
+4. **Telegram broadcast** — delivered to all active, non-paused subscribers; long reports are split on paragraph boundaries and fall back to plain text if the LLM produces malformed Markdown.
+
+Sell flags are *market-level cautions* (technical breakdown), distinct from the per-position exit alerts that fire only after you record an entry via `/buy`.
+
+The recap never fabricates signals — if either the buy or sell list is empty, the report explicitly says so.
+
 ## Project Structure
 
 ```
@@ -130,10 +149,11 @@ stock-bot-vn/
 │   │   └── dedup.py        # News deduplication via SHA256 hash
 │   ├── engine/
 │   │   ├── technical.py    # RSI, MACD, MA signals via vnstock + ta
-│   │   ├── sentiment.py    # Gemini AI two-layer sentiment scoring
+│   │   ├── sentiment.py    # Gemini AI two-layer sentiment scoring + daily recap prompt
+│   │   ├── market_index.py # VN-Index / VN30 / HNX / UPCOM snapshot + top movers
 │   │   └── decision.py     # Buy/sell signal logic and message formatting
 │   └── scheduler/
-│       └── jobs.py         # Hourly update job + exit signal monitoring
+│       └── jobs.py         # Hourly update loop, exit monitoring, 4 PM daily recap loop
 ├── .env                    # Secret keys (never committed)
 ├── .env.example            # Key template
 ├── requirements.txt
@@ -152,6 +172,7 @@ stock-bot-vn/
 | Sentiment buy threshold | > 0.6 |
 | Default watchlist | VN30 tickers |
 | Update schedule | Weekdays 8:00–15:00 ICT, hourly |
+| Daily recap schedule | Weekdays 16:00 ICT, broadcast to all subscribers |
 | Data failure alert | 2 consecutive failed cycles |
 
 ## Disclaimer

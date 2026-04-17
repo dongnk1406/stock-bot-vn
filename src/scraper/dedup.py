@@ -26,3 +26,17 @@ async def mark_processed(title: str, source: str, ticker: str, sentiment_score: 
             """,
             h, title, source, ticker, sentiment_score,
         )
+
+
+async def prune_old_news(days: int = 30) -> int:
+    """Delete processed_news rows older than `days`. Returns rows deleted."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            f"DELETE FROM processed_news WHERE processed_at < NOW() - INTERVAL '{int(days)} days'"
+        )
+    # asyncpg returns e.g. "DELETE 42"
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0

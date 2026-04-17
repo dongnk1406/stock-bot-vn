@@ -16,7 +16,7 @@ from src.handlers.commands import (
     watchlist, add_ticker, remove_ticker,
     set_portfolio, set_interval, buy, sell, check, news, help_command,
 )
-from src.scheduler.jobs import analysis_loop
+from src.scheduler.jobs import analysis_loop, daily_recap_loop
 
 BOT_COMMANDS = [
     BotCommand("start", "Khởi động bot và đăng ký tài khoản"),
@@ -45,6 +45,9 @@ logger = logging.getLogger(__name__)
 _HEALTH_PORT = int(os.environ.get("PORT", 8080))
 _HEALTH_HOST = os.environ.get("HEALTH_HOST", "0.0.0.0")
 _RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+_KEEP_ALIVE_MINUTES = 10  # Render free tier spins down after ~15 min idle.
+
+_background_tasks: list[asyncio.Task] = []
 
 
 class _HealthHandler(BaseHTTPRequestHandler):
@@ -82,14 +85,17 @@ async def post_init(application):
 
     # Continuous analysis loop: dedupes tickers across subscribers, dynamically paces
     # each cycle to finish at the next :00/:30 delivery slot during market hours.
-    application.create_task(analysis_loop(application.bot))
+    _background_tasks.append(application.create_task(analysis_loop(application.bot)))
     logger.info("Analysis loop started (Mon–Fri 8:00–15:30 ICT, dynamic pre-roll).")
+
+    _background_tasks.append(application.create_task(daily_recap_loop(application.bot)))
+    logger.info("Daily recap loop started (Mon–Fri 16:00 ICT).")
 
     application.job_queue.run_custom(
         _keep_alive,
-        job_kwargs={"trigger": IntervalTrigger(minutes=1)},
+        job_kwargs={"trigger": IntervalTrigger(minutes=_KEEP_ALIVE_MINUTES)},
     )
-    logger.info("Keep-alive job registered (every 1 min).")
+    logger.info(f"Keep-alive job registered (every {_KEEP_ALIVE_MINUTES} min).")
 
     thread = threading.Thread(target=_start_health_server, daemon=True)
     thread.start()
@@ -97,6 +103,14 @@ async def post_init(application):
 
 
 async def post_shutdown(application):
+    for task in _background_tasks:
+        if not task.done():
+            task.cancel()
+    if _background_tasks:
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
+        logger.info(f"Cancelled {len(_background_tasks)} background task(s).")
+    _background_tasks.clear()
+
     await close_pool()
     logger.info("Database pool closed.")
 

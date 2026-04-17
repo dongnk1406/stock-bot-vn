@@ -7,7 +7,7 @@ The goal is to build a high-performance, cost-effective Telegram bot that monito
 ## 2. Optimized Technical Stack
 To maintain a "lean" profile for individual use, the following stack is recommended:
 * **Language:** Python 3.10+ (Asynchronous)
-* **AI Engine:** Google Gemini 2.0 Flash (Faster and more capable than 1.5 Flash, with a generous free tier for personal API usage).
+* **AI Engine:** Google Gemini 2.5 Flash by default (overridable via `GEMINI_MODEL` env var). Gemini has a generous free tier for personal API usage.
 * **Data Ingestion:**
     * *VN News:* `httpx` + `BeautifulSoup4` — scrapes CafeF, Vietstock, Tin Nhanh Chung Khoan (ticker news + "Vĩ mô" macro sections).
     * *Global Macro:* `yfinance` — tracks DXY (USD Index), S&P 500, Gold (XAU/USD).
@@ -65,7 +65,7 @@ Exit monitoring begins only after the user confirms an executed trade via `/buy 
 
 ### I. Cost Optimization
 * **Token Management:** Strip HTML tags and irrelevant metadata (ads, sidebars) from news articles before sending them to the AI to minimize token consumption.
-* **Model Tiering:** Use Gemini 1.5 Flash for routine news sorting and only trigger more expensive models (like GPT-4o) for complex portfolio rebalancing advice.
+* **Model Tiering (aspirational):** Use Gemini Flash tier for routine news sorting and only trigger more expensive models for complex portfolio rebalancing advice. Currently the bot uses a single model (default `gemini-2.5-flash`) for all AI calls.
 
 ### II. Performance Optimization
 * **Asynchronous Execution:** Use `asyncio` to ensure the bot can scrape news, calculate indicators, and respond to user commands simultaneously without lag.
@@ -87,6 +87,26 @@ Exit monitoring begins only after the user confirms an executed trade via `/buy 
     2. **Watchlist Status:** For each ticker — current price, RSI, MACD status, and composite sentiment score.
     3. **Signal Alerts:** Flag any ticker that now meets all 5 Buy conditions (or previously met them and conditions have since broken).
     4. **Buy / Sell Suggestion (if triggered):** See reasoning format below.
+
+### Daily Market Recap (End-of-Day, 4:00 PM ICT)
+* **Schedule:** Every weekday (Monday–Friday) at **4:00 PM ICT** — runs inside the local bot via `daily_recap_loop` in `src/scheduler/jobs.py`.
+* **Engine:** Gemini (`GEMINI_MODEL`, default `gemini-2.5-flash`) — a single LLM call composes the Markdown report. Shares the existing sentiment rate-limit lock to respect the free-tier 5 req/min quota.
+* **Purpose:** End-of-day wrap-up delivered ~75 min after the ATC session closes at 2:45 PM, allowing time for official figures and post-close commentary to publish.
+* **Data pulled before the LLM call:**
+    * Index OHLC + change % + volume for VN-Index, VN30, HNX-Index, UPCOM-Index — via `vnstock.stock_historical_data(type="index")` (DNSE / EntradeX).
+    * Top 5 gainers / losers — via `vnstock.market_top_mover` with a VN30 % change fallback if SSI is unavailable.
+    * Global macro (DXY, S&P 500, Gold, Oil) — existing `fetch_global_macro` (yfinance).
+    * Macro news (CafeF Vĩ mô + Investing/DailyFX RSS) — existing scrapers.
+    * Ticker news for each top-mover ticker — existing CafeF scraper.
+* **Report contents (Vietnamese Markdown):**
+    1. **📌 Sự kiện nổi bật** — macro news, policy moves, corporate actions, foreign flows.
+    2. **📈 Diễn biến chỉ số** — VN-Index / VN30 / HNX-Index / UPCOM-Index summary, breadth and liquidity commentary.
+    3. **🎯 Ngành & cổ phiếu dẫn dắt** — leading / lagging sectors and the tickers driving them.
+    4. **💡 Khuyến nghị mua / bán** — two grounded subsections:
+        * **Buy** — only tickers passing the full 5-condition `check_buy_signal` rule (trend + RSI 45–65 + MACD bullish crossover ≤3 days + volume ≥ 20-day avg + AI sentiment > 0.6). Gemini must quote from this list or state "Không có mã qua đủ 5 điều kiện MUA hôm nay."
+        * **Sell caution (market-level)** — VN30 tickers showing daily technical breakdown: price < MA20, RSI(14) > 70, or MACD bearish crossover within the last 3 days. These are *market-level* cautions distinct from per-position exits (which only fire after `/buy`). Gemini must quote from this list or state "Không có cảnh báo bán cấp thị trường hôm nay." Never fabricates signals.
+* **Delivery:** Broadcast via Telegram to all active, non-paused subscribers. Messages longer than 3800 chars are split on paragraph boundaries. Falls back to plain text if the LLM produces malformed Markdown.
+* **Broadcast-only:** No on-demand `/recap` command is exposed, to protect the Gemini free-tier quota (5 req/min) — each recap already consumes up to ~6 Gemini calls (sentiment on tech-passers + final composition), so allowing user spam would exhaust the quota.
 
 ### Suggestion Reasoning Format
 All messages are in **Vietnamese**. Technical abbreviations (RSI, MACD, MA) remain in English.
@@ -174,5 +194,6 @@ Whenever the bot suggests a **Buy** or **Sell** with a recommended amount, it mu
 | Composite sentiment buy threshold | > 0.6 |
 | Default watchlist | VN30 tickers |
 | Update schedule | Weekdays 8 AM–3 PM ICT, hourly |
+| Daily recap schedule | Weekdays 4 PM ICT, local `daily_recap_loop` (Gemini, Telegram broadcast) |
 | Data source failure alert | 2 consecutive failed cycles (~30 min) |
 | Output language | Vietnamese (technical symbols in English) |

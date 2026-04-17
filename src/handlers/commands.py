@@ -1,6 +1,8 @@
 from __future__ import annotations
 import asyncio
 import re
+import time
+from collections import deque
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.models.database import get_pool
@@ -9,9 +11,64 @@ from src.config import VN30_TICKERS
 _TICKER_RE = re.compile(r'^[A-Z0-9]{1,10}$')
 _MAX_PORTFOLIO = 10 ** 15
 
+# /check rate limit: max 3 calls per 5 min per chat_id (Gemini quota protection).
+_CHECK_WINDOW_SEC = 300
+_CHECK_MAX_CALLS = 3
+_check_windows: dict[int, deque[float]] = {}
+
 
 def _valid_ticker(ticker: str) -> bool:
     return bool(_TICKER_RE.match(ticker))
+
+
+def _digits_only(s: str) -> str:
+    """Strip everything except digits. Handles VN thousands separators ('.', ',', space)."""
+    return "".join(c for c in s if c.isdigit())
+
+
+def _check_rate_limit(chat_id: int) -> tuple[bool, int]:
+    """Sliding-window limiter for /check. Returns (allowed, retry_after_seconds)."""
+    now = time.monotonic()
+    window = _check_windows.setdefault(chat_id, deque())
+    while window and now - window[0] > _CHECK_WINDOW_SEC:
+        window.popleft()
+    if len(window) >= _CHECK_MAX_CALLS:
+        return False, int(_CHECK_WINDOW_SEC - (now - window[0])) + 1
+    window.append(now)
+    return True, 0
+
+
+_HELP_BODY = (
+    "📖 HƯỚNG DẪN SỬ DỤNG\n"
+    "─────────────────────────────\n\n"
+    "Theo dõi thị trường:\n"
+    "/subscribe — Bật nhận cập nhật mỗi 30 phút (T2-T6, 8:00-15:00)\n"
+    "/unsubscribe — Tắt cập nhật\n"
+    "/pause — Tạm dừng cập nhật\n"
+    "/resume — Tiếp tục cập nhật\n\n"
+    "Quản lý danh mục:\n"
+    "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
+    "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
+    "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
+    "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n"
+    "/setinterval [phút] — Cài tần suất cập nhật (30/60/90/120 phút, mặc định 30)\n\n"
+    "Quản lý vị thế:\n"
+    "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
+    "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
+    "Phân tích:\n"
+    "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
+    "/news — Xem tin tức vĩ mô mới nhất\n"
+    "/news [TICKER] — Xem tin tức theo mã cổ phiếu\n"
+    "\nHệ thống tự động gửi tổng kết phiên lúc 16:00 (T2–T6).\n"
+)
+
+_DISCLAIMER = (
+    "─────────────────────────────\n"
+    "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
+    "Bot này chỉ cung cấp thông tin tham khảo dựa trên phân tích kỹ thuật và AI. "
+    "Đây KHÔNG phải lời khuyên đầu tư tài chính. "
+    "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+)
 
 
 async def _ensure_subscriber(chat_id: int, username: str, first_name: str) -> None:
@@ -48,32 +105,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"Xin chào {user.first_name}! 👋\n"
         "Chào mừng bạn đến với Stock Bot VN — bot phân tích chứng khoán Việt Nam.\n"
         "Danh mục theo dõi mặc định VN30 đã được tải.\n\n"
-        "📖 HƯỚNG DẪN SỬ DỤNG\n"
-        "─────────────────────────────\n\n"
-        "Theo dõi thị trường:\n"
-        "/subscribe — Bật nhận cập nhật mỗi 30 phút (T2-T6, 8:00-15:00)\n"
-        "/unsubscribe — Tắt cập nhật\n"
-        "/pause — Tạm dừng cập nhật\n"
-        "/resume — Tiếp tục cập nhật\n\n"
-        "Quản lý danh mục:\n"
-        "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
-        "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
-        "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
-        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n"
-        "/setinterval [phút] — Cài tần suất cập nhật (30/60/90/120 phút, mặc định 30)\n\n"
-        "Quản lý vị thế:\n"
-        "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
-        "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
-        "Phân tích:\n"
-        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
-        "/news — Xem tin tức vĩ mô mới nhất\n"
-        "/news [TICKER] — Xem tin tức theo mã cổ phiếu\n"
-        "/help — Xem lại hướng dẫn này\n\n"
-        "─────────────────────────────\n"
-        "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
-        "Bot này chỉ cung cấp thông tin tham khảo dựa trên phân tích kỹ thuật và AI. "
-        "Đây KHÔNG phải lời khuyên đầu tư tài chính. "
-        "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+        + _HELP_BODY
+        + "/help — Xem lại hướng dẫn này\n\n"
+        + _DISCLAIMER
     )
 
 
@@ -195,11 +229,11 @@ async def set_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Cú pháp: /setportfolio [số tiền] — ví dụ: /setportfolio 100000000")
         return
 
-    try:
-        amount = int(context.args[0].replace(",", "").replace(".", ""))
-    except ValueError:
+    digits = _digits_only(context.args[0])
+    if not digits:
         await update.message.reply_text("Số tiền không hợp lệ. Nhập số nguyên VNĐ.")
         return
+    amount = int(digits)
 
     if amount <= 0 or amount > _MAX_PORTFOLIO:
         await update.message.reply_text("Giá trị danh mục ngoài khoảng cho phép.")
@@ -227,11 +261,11 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _valid_ticker(ticker):
         await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
         return
-    try:
-        price = float(context.args[1].replace(",", ""))
-    except ValueError:
+    digits = _digits_only(context.args[1])
+    if not digits:
         await update.message.reply_text("Giá không hợp lệ.")
         return
+    price = float(digits)
 
     await _ensure_subscriber(user.id, user.username, user.first_name)
     pool = await get_pool()
@@ -319,28 +353,7 @@ async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📖 HƯỚNG DẪN SỬ DỤNG BOT\n"
-        "─────────────────────────────\n\n"
-        "Theo dõi thị trường:\n"
-        "/subscribe — Bật nhận cập nhật mỗi 30 phút (T2-T6, 8:00-15:00)\n"
-        "/unsubscribe — Tắt cập nhật\n"
-        "/pause — Tạm dừng cập nhật\n"
-        "/resume — Tiếp tục cập nhật\n\n"
-        "Quản lý danh mục:\n"
-        "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
-        "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
-        "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
-        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n"
-        "/setinterval [phút] — Cài tần suất cập nhật (30/60/90/120 phút, mặc định 30)\n\n"
-        "Quản lý vị thế:\n"
-        "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
-        "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
-        "Phân tích:\n"
-        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
-        "/news — Xem tin tức vĩ mô mới nhất\n"
-        "/news [TICKER] — Xem tin tức theo mã cổ phiếu\n\n"
-    )
+    await update.message.reply_text(_HELP_BODY + "\n" + _DISCLAIMER)
 
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -409,6 +422,15 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not _valid_ticker(ticker):
         await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
         return
+
+    ok, retry_after = _check_rate_limit(user.id)
+    if not ok:
+        await update.message.reply_text(
+            f"⏱️ Bạn đã dùng /check {_CHECK_MAX_CALLS} lần trong 5 phút vừa qua. "
+            f"Vui lòng chờ {retry_after}s rồi thử lại."
+        )
+        return
+
     await update.message.reply_text(f"Đang phân tích {ticker}...")
 
     from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
@@ -420,7 +442,6 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         format_buy_message, format_watchlist_status, format_conclusion,
     )
 
-    user = update.effective_user
     pool = await get_pool()
     async with pool.acquire() as conn:
         portfolio_value = await conn.fetchval(

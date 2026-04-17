@@ -426,7 +426,6 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await update.message.reply_text(f"Đang phân tích {ticker}...")
 
-    from datetime import datetime
     from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
     from src.scraper.macro import fetch_global_macro, fetch_rss_news
     from src.engine.technical import compute_daily_signals, compute_1h_signals
@@ -443,23 +442,11 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "SELECT portfolio_value FROM subscribers WHERE chat_id = $1", user.id
         ) or 0
 
-    # 1. Macro snapshot
+    # 1. Macro data (for sentiment context only, not displayed)
     macro_data, macro_news, rss_news = await asyncio.gather(
         fetch_global_macro(),
         fetch_macro_news(),
         fetch_rss_news(),
-    )
-    now = datetime.now().strftime("%H:%M %d/%m/%Y")
-    if macro_data:
-        macro_lines = []
-        for name, data in macro_data.items():
-            arrow = "📈" if data["change_pct"] > 0 else "📉"
-            macro_lines.append(f"  {arrow} {name}: {data['price']:,.2f} ({data['change_pct']:+.2f}%)")
-        macro_text = "\n".join(macro_lines)
-    else:
-        macro_text = "  ⚠️ Không lấy được dữ liệu vĩ mô"
-    await update.message.reply_text(
-        f"🕐 PHÂN TÍCH — {now}\n{'─'*34}\n🌍 Vĩ mô toàn cầu:\n{macro_text}"
     )
 
     # 2. Technical + sentiment analysis

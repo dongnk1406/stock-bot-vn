@@ -12,7 +12,7 @@ RSS_FEEDS = [
 ]
 
 MACRO_SYMBOLS = {
-    "DXY": "^DXY",
+    "DXY": "DX-Y.NYB",
     "S&P500": "^GSPC",
     "GOLD": "GC=F",
     "OIL": "CL=F",

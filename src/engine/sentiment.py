@@ -3,12 +3,13 @@ import asyncio
 import json
 import logging
 import google.generativeai as genai
-from src.config import GEMINI_API_KEY
+from src.config import GEMINI_API_KEY, GEMINI_MODEL
 
 logger = logging.getLogger(__name__)
 
 genai.configure(api_key=GEMINI_API_KEY)
-_model = genai.GenerativeModel("gemini-2.0-flash")
+_model = genai.GenerativeModel(GEMINI_MODEL)
+logger.info(f"Gemini model: {GEMINI_MODEL}")
 
 _SYSTEM = (
     "Bạn là nhà quản lý quỹ người Việt Nam, thận trọng, chuyên phân tích TTCK Việt Nam. "

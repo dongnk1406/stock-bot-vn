@@ -33,19 +33,30 @@ async def _get(url: str) -> str | None:
 def _parse_articles(html: str, source: str, limit: int) -> list[dict]:
     soup = BeautifulSoup(html, "html.parser")
     articles = []
-    items = soup.select(".article-item, .tlitem, .story, .item-news, .list-news li")[:limit]
+    seen = set()
+    items = soup.select(
+        ".box-category-item, div.item:has(h3.titlehidden), "
+        ".tlitem, .article-item, .story, .item-news, .list-news li"
+    )
     for item in items:
-        title_tag = item.select_one("h3 a, h2 a, .title a")
+        if len(articles) >= limit:
+            break
+        title_tag = item.select_one(
+            "h3.titlehidden a, a.box-category-link-title, h3 a, h2 a, .title a"
+        )
         if not title_tag:
             continue
-        title = title_tag.get_text(strip=True)
+        title = title_tag.get_text(" ", strip=True)
         if not title:
             continue
         link = title_tag.get("href", "")
         if link and not link.startswith("http"):
             link = f"https://cafef.vn{link}"
-        summary_tag = item.select_one("p, .sapo, .summary")
-        summary = summary_tag.get_text(strip=True)[:300] if summary_tag else ""
+        if link in seen:
+            continue
+        seen.add(link)
+        summary_tag = item.select_one(".sapo, .summary, p")
+        summary = summary_tag.get_text(" ", strip=True)[:300] if summary_tag else ""
         articles.append({"title": title, "summary": summary, "url": link, "source": source})
     return articles
 

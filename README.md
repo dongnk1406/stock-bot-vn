@@ -25,7 +25,7 @@ AI-powered Telegram bot for Vietnamese stock market analysis. Monitors news, run
 | News Scraping | httpx + BeautifulSoup4 |
 | Global Macro | yfinance + feedparser |
 | Database | PostgreSQL (Supabase) |
-| Deployment | Docker / VPS |
+| Deployment | Render |
 
 ## Prerequisites
 

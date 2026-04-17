@@ -3,7 +3,11 @@
     "allow": [
       "Bash(.venv/bin/python *)",
       "Bash(.venv/bin/pip install *)",
-      "Bash(.venv/bin/pip index *)"
+      "Bash(.venv/bin/pip index *)",
+      "Bash(pkill -9 -f \"python main.py\")",
+      "Read(//private/tmp/**)",
+      "Bash(python3 *)",
+      "Bash(pip3 install *)"
     ]
   }
 }

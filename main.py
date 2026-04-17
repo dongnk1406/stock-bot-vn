@@ -97,9 +97,9 @@ async def post_init(application):
 
     application.job_queue.run_custom(
         _keep_alive,
-        job_kwargs={"trigger": IntervalTrigger(minutes=5)},
+        job_kwargs={"trigger": IntervalTrigger(minutes=1)},
     )
-    logger.info("Keep-alive job registered (every 5 min).")
+    logger.info("Keep-alive job registered (every 1 min).")
 
     thread = threading.Thread(target=_start_health_server, daemon=True)
     thread.start()

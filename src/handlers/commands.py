@@ -398,25 +398,10 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
     if not context.args:
-        # No ticker — run full watchlist analysis identical to hourly job
-        await update.message.reply_text("Đang phân tích toàn bộ danh mục...")
-        from src.scraper.cafef import fetch_macro_news
-        from src.scraper.macro import fetch_global_macro, fetch_rss_news
-        from src.scheduler.jobs import _update_subscriber
-
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            portfolio_value = await conn.fetchval(
-                "SELECT portfolio_value FROM subscribers WHERE chat_id = $1", user.id
-            ) or 0
-
-        macro_data, macro_news, rss_news = await asyncio.gather(
-            fetch_global_macro(),
-            fetch_macro_news(),
-            fetch_rss_news(),
-        )
-        await _update_subscriber(
-            context.bot, user.id, portfolio_value, macro_data, macro_news + rss_news
+        await update.message.reply_text(
+            "Vui lòng cung cấp mã cổ phiếu — ví dụ: `/check HPG`\n\n"
+            "_Phân tích toàn bộ danh mục sẽ được gửi tự động theo lịch cập nhật._",
+            parse_mode="Markdown",
         )
         return
 

@@ -1,15 +1,14 @@
+import asyncio
 import logging
 import os
 import threading
-import pytz
 import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram import BotCommand
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 from telegram.error import TelegramError
-from src.config import TELEGRAM_BOT_TOKEN, MARKET_TZ
+from src.config import TELEGRAM_BOT_TOKEN
 from src.models.database import get_pool, close_pool
 from src.models.schema import init_schema
 from src.handlers.commands import (
@@ -17,7 +16,7 @@ from src.handlers.commands import (
     watchlist, add_ticker, remove_ticker,
     set_portfolio, set_interval, buy, sell, check, news, help_command,
 )
-from src.scheduler.jobs import hourly_update
+from src.scheduler.jobs import analysis_loop
 
 BOT_COMMANDS = [
     BotCommand("start", "Khởi động bot và đăng ký tài khoản"),
@@ -81,19 +80,10 @@ async def post_init(application):
     await application.bot.set_my_commands(BOT_COMMANDS)
     logger.info("Bot command menu registered.")
 
-    tz = pytz.timezone(MARKET_TZ)
-    application.job_queue.run_custom(
-        hourly_update,
-        job_kwargs={
-            "trigger": CronTrigger(
-                day_of_week="mon-fri",
-                hour="8-15",
-                minute="0,30",
-                timezone=tz,
-            )
-        },
-    )
-    logger.info("Scheduler registered (Mon–Fri 8:00–15:00 ICT, every 30 min).")
+    # Continuous analysis loop: dedupes tickers across subscribers, dynamically paces
+    # each cycle to finish at the next :00/:30 delivery slot during market hours.
+    application.create_task(analysis_loop(application.bot))
+    logger.info("Analysis loop started (Mon–Fri 8:00–15:30 ICT, dynamic pre-roll).")
 
     application.job_queue.run_custom(
         _keep_alive,

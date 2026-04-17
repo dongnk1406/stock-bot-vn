@@ -43,7 +43,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "📖 HƯỚNG DẪN SỬ DỤNG\n"
         "─────────────────────────────\n\n"
         "Theo dõi thị trường:\n"
-        "/subscribe — Bật nhận cập nhật hàng giờ (T2-T6, 8:00-15:00)\n"
+        "/subscribe — Bật nhận cập nhật mỗi 30 phút (T2-T6, 8:00-15:00)\n"
         "/unsubscribe — Tắt cập nhật\n"
         "/pause — Tạm dừng cập nhật\n"
         "/resume — Tiếp tục cập nhật\n\n"
@@ -51,12 +51,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
         "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
         "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
-        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n\n"
+        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n"
+        "/setinterval [phút] — Cài tần suất cập nhật (30/60/90/120 phút, mặc định 30)\n\n"
         "Quản lý vị thế:\n"
         "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
         "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
         "Phân tích:\n"
         "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
+        "/news — Xem tin tức vĩ mô mới nhất\n"
+        "/news [TICKER] — Xem tin tức theo mã cổ phiếu\n"
         "/help — Xem lại hướng dẫn này\n\n"
         "─────────────────────────────\n"
         "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
@@ -76,7 +79,7 @@ async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "UPDATE subscribers SET is_active = TRUE, is_paused = FALSE WHERE chat_id = $1",
             user.id,
         )
-    await update.message.reply_text("Đã bật nhận cập nhật hàng giờ (8:00–15:00, T2–T6).")
+    await update.message.reply_text("Đã bật nhận cập nhật mỗi 30 phút (T2–T6, 8:00–15:00).")
 
 
 async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,12 +254,52 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(f"Không tìm thấy vị thế đang mở cho {ticker}.")
 
 
+VALID_INTERVALS = [30, 60, 90, 120]
+
+
+async def set_interval(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text(
+            "Cú pháp: /setinterval [phút]\n\n"
+            f"Các mức hợp lệ: {', '.join(str(i) for i in VALID_INTERVALS)} phút\n"
+            "Ví dụ: /setinterval 60\n\n"
+            "Mặc định: 30 phút"
+        )
+        return
+
+    try:
+        minutes = int(context.args[0])
+    except ValueError:
+        await update.message.reply_text("Giá trị không hợp lệ. Vui lòng nhập số phút.")
+        return
+
+    if minutes not in VALID_INTERVALS:
+        await update.message.reply_text(
+            f"Chỉ hỗ trợ các mức: {', '.join(str(i) for i in VALID_INTERVALS)} phút."
+        )
+        return
+
+    await _ensure_subscriber(user.id, user.username, user.first_name)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET update_interval = $1 WHERE chat_id = $2",
+            minutes, user.id,
+        )
+
+    await update.message.reply_text(
+        f"Đã cập nhật tần suất cập nhật: mỗi {minutes} phút.\n"
+        "Thay đổi có hiệu lực từ chu kỳ tiếp theo."
+    )
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
         "📖 HƯỚNG DẪN SỬ DỤNG BOT\n"
         "─────────────────────────────\n\n"
         "Theo dõi thị trường:\n"
-        "/subscribe — Bật nhận cập nhật hàng giờ (T2-T6, 8:00-15:00)\n"
+        "/subscribe — Bật nhận cập nhật mỗi 30 phút (T2-T6, 8:00-15:00)\n"
         "/unsubscribe — Tắt cập nhật\n"
         "/pause — Tạm dừng cập nhật\n"
         "/resume — Tiếp tục cập nhật\n\n"
@@ -264,33 +307,104 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
         "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
         "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
-        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n\n"
+        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n"
+        "/setinterval [phút] — Cài tần suất cập nhật (30/60/90/120 phút, mặc định 30)\n\n"
         "Quản lý vị thế:\n"
         "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
         "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
         "Phân tích:\n"
-        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n\n"
-        "─────────────────────────────\n"
-        "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
-        "Bot này chỉ cung cấp thông tin tham khảo dựa trên phân tích kỹ thuật và AI. "
-        "Đây KHÔNG phải lời khuyên đầu tư tài chính. "
-        "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
+        "/news — Xem tin tức vĩ mô mới nhất\n"
+        "/news [TICKER] — Xem tin tức theo mã cổ phiếu\n\n"
+    )
+
+
+async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    ticker = context.args[0].upper() if context.args else None
+    await update.message.reply_text(
+        f"Đang lấy tin tức {'cho ' + ticker if ticker else 'vĩ mô'}..."
+    )
+
+    from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
+    from src.scraper.macro import fetch_rss_news
+
+    if ticker:
+        articles = await fetch_ticker_news(ticker, limit=5)
+        header = f"📰 Tin tức mới nhất về {ticker}"
+    else:
+        cafef_articles, rss_articles = await asyncio.gather(
+            fetch_macro_news(limit=5),
+            fetch_rss_news(limit=5),
+        )
+        articles = cafef_articles + rss_articles
+        header = "🌐 Tin tức vĩ mô mới nhất"
+
+    if not articles:
+        await update.message.reply_text("Không tìm thấy tin tức. Vui lòng thử lại sau.")
+        return
+
+    valid_articles = [a for a in articles if a.get("title", "").strip()]
+    if not valid_articles:
+        await update.message.reply_text("Không tìm thấy tin tức. Vui lòng thử lại sau.")
+        return
+
+    lines = [header, "─" * 30]
+    for i, a in enumerate(valid_articles, 1):
+        title = a.get("title", "").strip()
+        url = a.get("url", "").strip()
+        source = a.get("source", "").strip()
+        summary = a.get("summary", "").strip()
+        entry = f"{i}. *{title}*"
+        if summary:
+            entry += f"\n_{summary[:150]}{'...' if len(summary) > 150 else ''}_"
+        entry += f"\n🔗 [{source}]({url})" if url else f"\n📌 {source}"
+        lines.append(entry)
+
+    await update.message.reply_text(
+        "\n\n".join(lines),
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
 
 async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+
     if not context.args:
-        await update.message.reply_text("Cú pháp: /check [TICKER] — ví dụ: /check HPG")
+        # No ticker — run full watchlist analysis identical to hourly job
+        await update.message.reply_text("Đang phân tích toàn bộ danh mục...")
+        from src.scraper.cafef import fetch_macro_news
+        from src.scraper.macro import fetch_global_macro, fetch_rss_news
+        from src.scheduler.jobs import _update_subscriber
+
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            portfolio_value = await conn.fetchval(
+                "SELECT portfolio_value FROM subscribers WHERE chat_id = $1", user.id
+            ) or 0
+
+        macro_data, macro_news, rss_news = await asyncio.gather(
+            fetch_global_macro(),
+            fetch_macro_news(),
+            fetch_rss_news(),
+        )
+        await _update_subscriber(
+            context.bot, user.id, portfolio_value, macro_data, macro_news + rss_news
+        )
         return
 
     ticker = context.args[0].upper()
     await update.message.reply_text(f"Đang phân tích {ticker}...")
 
+    from datetime import datetime
     from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
-    from src.scraper.macro import fetch_global_macro
-    from src.engine.technical import compute_daily_signals
+    from src.scraper.macro import fetch_global_macro, fetch_rss_news
+    from src.engine.technical import compute_daily_signals, compute_1h_signals
     from src.engine.sentiment import analyze_sentiment
-    from src.engine.decision import check_buy_signal, format_buy_message, format_watchlist_status
+    from src.engine.decision import (
+        check_buy_signal, check_sell_signals,
+        format_buy_message, format_watchlist_status, format_conclusion,
+    )
 
     user = update.effective_user
     pool = await get_pool()
@@ -299,23 +413,68 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "SELECT portfolio_value FROM subscribers WHERE chat_id = $1", user.id
         ) or 0
 
+    # 1. Macro snapshot
+    macro_data, macro_news, rss_news = await asyncio.gather(
+        fetch_global_macro(),
+        fetch_macro_news(),
+        fetch_rss_news(),
+    )
+    now = datetime.now().strftime("%H:%M %d/%m/%Y")
+    if macro_data:
+        macro_lines = []
+        for name, data in macro_data.items():
+            arrow = "📈" if data["change_pct"] > 0 else "📉"
+            macro_lines.append(f"  {arrow} {name}: {data['price']:,.2f} ({data['change_pct']:+.2f}%)")
+        macro_text = "\n".join(macro_lines)
+    else:
+        macro_text = "  ⚠️ Không lấy được dữ liệu vĩ mô"
+    await update.message.reply_text(
+        f"🕐 PHÂN TÍCH — {now}\n{'─'*34}\n🌍 Vĩ mô toàn cầu:\n{macro_text}"
+    )
+
+    # 2. Technical + sentiment analysis
     technical = await compute_daily_signals(ticker)
     if technical is None:
         await update.message.reply_text(f"Không đủ dữ liệu cho {ticker}. Kiểm tra lại mã cổ phiếu.")
         return
 
-    ticker_news, macro_news, macro_data = await asyncio.gather(
-        fetch_ticker_news(ticker),
-        fetch_macro_news(),
-        fetch_global_macro(),
-    )
-
-    sentiment = await analyze_sentiment(ticker, ticker_news, macro_news, macro_data)
+    ticker_news = await fetch_ticker_news(ticker)
+    all_macro_news = macro_news + rss_news
+    sentiment = await analyze_sentiment(ticker, ticker_news, all_macro_news, macro_data)
     conditions = check_buy_signal(technical, sentiment)
 
+    # 3. Watchlist status
     status = format_watchlist_status(ticker, technical, sentiment, conditions)
-    await update.message.reply_text(status, parse_mode="Markdown")
+    await update.message.reply_text(
+        f"📊 *DANH MỤC THEO DÕI:*\n\n{status}",
+        parse_mode="Markdown",
+    )
 
+    # 4. Conclusion
+    conclusion = format_conclusion([(ticker, technical, sentiment, conditions)], portfolio_value)
+    await update.message.reply_text(conclusion, parse_mode="Markdown")
+
+    # 5. Detailed buy message
     if conditions["signal"] and portfolio_value > 0:
-        msg = format_buy_message(ticker, technical, sentiment, conditions, portfolio_value)
-        await update.message.reply_text(msg)
+        await update.message.reply_text(
+            format_buy_message(ticker, technical, sentiment, conditions, portfolio_value)
+        )
+
+    # 6. Exit signals if there's an open position
+    async with pool.acquire() as conn:
+        entry = await conn.fetchval(
+            "SELECT entry_price FROM entry_prices WHERE chat_id = $1 AND ticker = $2 AND is_active = TRUE",
+            user.id, ticker,
+        )
+    if entry:
+        signals_1h = await compute_1h_signals(ticker)
+        if signals_1h:
+            result = check_sell_signals(signals_1h, entry)
+            for alert_type, message in result["alerts"]:
+                emoji = "🚨" if alert_type == "stop_loss" else "⚠️"
+                await update.message.reply_text(
+                    f"{emoji} *{ticker}* — {message}\n"
+                    f"Giá hiện tại: {result['price']:,.0f} VNĐ | Giá vào: {entry:,.0f} VNĐ\n\n"
+                    f"⚠️ _Đây chỉ là gợi ý tham khảo, không phải lời khuyên tài chính._",
+                    parse_mode="Markdown",
+                )

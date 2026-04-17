@@ -2,14 +2,19 @@ from src.models.database import get_pool
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS subscribers (
-    chat_id         BIGINT PRIMARY KEY,
-    username        TEXT,
-    first_name      TEXT,
-    subscribed_at   TIMESTAMPTZ DEFAULT NOW(),
-    is_active       BOOLEAN DEFAULT TRUE,
-    is_paused       BOOLEAN DEFAULT FALSE,
-    portfolio_value BIGINT DEFAULT 0
+    chat_id          BIGINT PRIMARY KEY,
+    username         TEXT,
+    first_name       TEXT,
+    subscribed_at    TIMESTAMPTZ DEFAULT NOW(),
+    is_active        BOOLEAN DEFAULT TRUE,
+    is_paused        BOOLEAN DEFAULT FALSE,
+    portfolio_value  BIGINT DEFAULT 0,
+    update_interval  INT DEFAULT 30,
+    last_updated_at  TIMESTAMPTZ DEFAULT NULL
 );
+
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS update_interval INT DEFAULT 30;
+ALTER TABLE subscribers ADD COLUMN IF NOT EXISTS last_updated_at TIMESTAMPTZ DEFAULT NULL;
 
 CREATE TABLE IF NOT EXISTS watchlist (
     id        SERIAL PRIMARY KEY,

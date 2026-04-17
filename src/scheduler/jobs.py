@@ -1,6 +1,6 @@
 from __future__ import annotations
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from telegram import Bot
 from telegram.ext import CallbackContext
 from src.models.database import get_pool
@@ -11,7 +11,7 @@ from src.engine.technical import compute_daily_signals, compute_1h_signals
 from src.engine.sentiment import analyze_sentiment
 from src.engine.decision import (
     check_buy_signal, check_sell_signals,
-    format_buy_message, format_watchlist_status,
+    format_buy_message, format_watchlist_status, format_conclusion,
 )
 
 logger = logging.getLogger(__name__)
@@ -28,14 +28,25 @@ async def hourly_update(context: CallbackContext) -> None:
         all_macro_news = macro_news + rss_news
 
         pool = await get_pool()
+        now = datetime.now(timezone.utc)
         async with pool.acquire() as conn:
             subscribers = await conn.fetch(
-                "SELECT chat_id, portfolio_value FROM subscribers WHERE is_active = TRUE AND is_paused = FALSE"
+                "SELECT chat_id, portfolio_value, update_interval, last_updated_at "
+                "FROM subscribers WHERE is_active = TRUE AND is_paused = FALSE"
             )
 
         for sub in subscribers:
+            interval = sub["update_interval"] or 30
+            last = sub["last_updated_at"]
+            if last is not None and (now - last) < timedelta(minutes=interval):
+                continue
             try:
                 await _update_subscriber(bot, sub["chat_id"], sub["portfolio_value"] or 0, macro_data, all_macro_news)
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE subscribers SET last_updated_at = $1 WHERE chat_id = $2",
+                        now, sub["chat_id"],
+                    )
             except Exception as e:
                 logger.error(f"Update failed for {sub['chat_id']}: {e}")
 
@@ -43,7 +54,7 @@ async def hourly_update(context: CallbackContext) -> None:
 
     except Exception as e:
         _consecutive_failures += 1
-        logger.error(f"Hourly job failed ({_consecutive_failures}/2): {e}")
+        logger.error(f"Update job failed ({_consecutive_failures}/2): {e}")
         if _consecutive_failures >= 2:
             await _broadcast_alert(bot, "⚠️ CẢNH BÁO: Mất kết nối dữ liệu. Bot tạm ngừng cập nhật tín hiệu.")
             _consecutive_failures = 0
@@ -58,22 +69,28 @@ async def _update_subscriber(bot: Bot, chat_id: int, portfolio_value: int, macro
         return
 
     now = datetime.now().strftime("%H:%M %d/%m/%Y")
-    macro_lines = []
-    for name, data in macro_data.items():
-        arrow = "📈" if data["change_pct"] > 0 else "📉"
-        macro_lines.append(f"  {arrow} {name}: {data['price']:,.2f} ({data['change_pct']:+.2f}%)")
+
+    # Build macro snapshot
+    if macro_data:
+        macro_lines = []
+        for name, data in macro_data.items():
+            arrow = "📈" if data["change_pct"] > 0 else "📉"
+            macro_lines.append(f"  {arrow} {name}: {data['price']:,.2f} ({data['change_pct']:+.2f}%)")
+        macro_text = "\n".join(macro_lines)
+    else:
+        macro_text = "  ⚠️ Không lấy được dữ liệu vĩ mô (Yahoo Finance tạm thời không phản hồi)"
 
     await bot.send_message(
         chat_id=chat_id,
         text=(
             f"🕐 CẬP NHẬT THỊ TRƯỜNG — {now}\n"
             f"{'─'*34}\n"
-            f"🌍 Vĩ mô toàn cầu:\n" + "\n".join(macro_lines)
+            f"🌍 Vĩ mô toàn cầu:\n{macro_text}"
         ),
     )
 
     watchlist_lines = []
-    buy_signals = []
+    all_results = []
 
     for row in rows:
         ticker = row["ticker"]
@@ -93,14 +110,13 @@ async def _update_subscriber(bot: Bot, chat_id: int, portfolio_value: int, macro
                 await mark_processed(n["title"], n["source"], ticker, sentiment["composite_score"])
 
             watchlist_lines.append(format_watchlist_status(ticker, technical, sentiment, conditions))
-
-            if conditions["signal"]:
-                buy_signals.append((ticker, technical, sentiment, conditions))
+            all_results.append((ticker, technical, sentiment, conditions))
 
         except Exception as e:
             logger.error(f"Ticker {ticker} analysis error: {e}")
             watchlist_lines.append(f"*{ticker}* — ⚠️ Lỗi phân tích")
 
+    # Send watchlist status
     if watchlist_lines:
         await bot.send_message(
             chat_id=chat_id,
@@ -108,8 +124,14 @@ async def _update_subscriber(bot: Bot, chat_id: int, portfolio_value: int, macro
             parse_mode="Markdown",
         )
 
-    for ticker, technical, sentiment, conditions in buy_signals:
-        if portfolio_value > 0:
+    # Send conclusion
+    if all_results:
+        conclusion = format_conclusion(all_results, portfolio_value)
+        await bot.send_message(chat_id=chat_id, text=conclusion, parse_mode="Markdown")
+
+    # Send detailed buy messages
+    for ticker, technical, sentiment, conditions in all_results:
+        if conditions["signal"] and portfolio_value > 0:
             await bot.send_message(
                 chat_id=chat_id,
                 text=format_buy_message(ticker, technical, sentiment, conditions, portfolio_value),

@@ -80,6 +80,42 @@ def format_buy_message(ticker: str, technical: dict, sentiment: dict, conditions
     )
 
 
+def format_conclusion(results: list, portfolio_value: int) -> str:
+    buy_tickers = [(t, tech, sent, cond) for t, tech, sent, cond in results if cond["signal"]]
+    no_buy = [(t, tech, sent, cond) for t, tech, sent, cond in results if not cond["signal"]]
+
+    lines = ["📋 *KẾT LUẬN PHÂN TÍCH*", "─" * 34]
+
+    if buy_tickers:
+        lines.append(f"\n✅ *NÊN MUA ({len(buy_tickers)} cổ phiếu):*")
+        for ticker, technical, sentiment, conditions in buy_tickers:
+            c = conditions["conditions"]
+            missing = [k for k, v in c.items() if not v]
+            reason = (
+                f"Giá {technical['price']:,.0f} | RSI {technical['rsi']:.0f} | "
+                f"Điểm AI {sentiment['composite_score']:.2f} — {sentiment['ticker_reason']}"
+            )
+            lines.append(f"  • *{ticker}*: {reason}")
+        if portfolio_value > 0:
+            lines.append(f"\n  Gợi ý mỗi lệnh ~{portfolio_value * PORTFOLIO_ALLOCATION_PCT:,.0f} VNĐ (15% danh mục)")
+    else:
+        lines.append("\n⚪ *CHƯA CÓ CỔ PHIẾU NÀO ĐỦ ĐIỀU KIỆN MUA*")
+
+    if no_buy:
+        lines.append(f"\n❌ *CHƯA NÊN MUA ({len(no_buy)} cổ phiếu):*")
+        label = {"trend": "Xu hướng", "rsi": "RSI", "macd_crossover": "MACD", "volume": "Khối lượng", "sentiment": "Tin tức"}
+        for ticker, technical, sentiment, conditions in no_buy[:5]:
+            missing = [label[k] for k, v in conditions["conditions"].items() if not v]
+            reason = ", ".join(missing) if missing else "Chưa rõ"
+            lines.append(f"  • *{ticker}*: Chưa đạt — {reason}")
+
+    lines.append(
+        "\n⚠️ _Đây chỉ là gợi ý tham khảo, không phải lời khuyên tài chính. "
+        "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm._"
+    )
+    return "\n".join(lines)
+
+
 def format_watchlist_status(ticker: str, technical: dict, sentiment: dict, conditions: dict) -> str:
     c = conditions["conditions"]
     tick = lambda b: "✅" if b else "❌"

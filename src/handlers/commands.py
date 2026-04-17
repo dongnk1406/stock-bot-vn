@@ -1,0 +1,321 @@
+from __future__ import annotations
+import asyncio
+from telegram import Update
+from telegram.ext import ContextTypes
+from src.models.database import get_pool
+from src.config import VN30_TICKERS
+
+
+async def _ensure_subscriber(chat_id: int, username: str, first_name: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO subscribers (chat_id, username, first_name)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (chat_id) DO UPDATE SET username = $2, first_name = $3
+            """,
+            chat_id, username, first_name,
+        )
+
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    await _ensure_subscriber(user.id, user.username, user.first_name)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET is_active = TRUE, is_paused = FALSE WHERE chat_id = $1",
+            user.id,
+        )
+        count = await conn.fetchval("SELECT COUNT(*) FROM watchlist WHERE chat_id = $1", user.id)
+        if count == 0:
+            await conn.executemany(
+                "INSERT INTO watchlist (chat_id, ticker) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                [(user.id, t) for t in VN30_TICKERS],
+            )
+
+    await update.message.reply_text(
+        f"Xin chào {user.first_name}! 👋\n"
+        "Chào mừng bạn đến với Stock Bot VN — bot phân tích chứng khoán Việt Nam.\n"
+        "Danh mục theo dõi mặc định VN30 đã được tải.\n\n"
+        "📖 HƯỚNG DẪN SỬ DỤNG\n"
+        "─────────────────────────────\n\n"
+        "Theo dõi thị trường:\n"
+        "/subscribe — Bật nhận cập nhật hàng giờ (T2-T6, 8:00-15:00)\n"
+        "/unsubscribe — Tắt cập nhật\n"
+        "/pause — Tạm dừng cập nhật\n"
+        "/resume — Tiếp tục cập nhật\n\n"
+        "Quản lý danh mục:\n"
+        "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
+        "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
+        "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
+        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n\n"
+        "Quản lý vị thế:\n"
+        "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
+        "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
+        "Phân tích:\n"
+        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n"
+        "/help — Xem lại hướng dẫn này\n\n"
+        "─────────────────────────────\n"
+        "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
+        "Bot này chỉ cung cấp thông tin tham khảo dựa trên phân tích kỹ thuật và AI. "
+        "Đây KHÔNG phải lời khuyên đầu tư tài chính. "
+        "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+    )
+
+
+async def subscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    await _ensure_subscriber(user.id, user.username, user.first_name)
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET is_active = TRUE, is_paused = FALSE WHERE chat_id = $1",
+            user.id,
+        )
+    await update.message.reply_text("Đã bật nhận cập nhật hàng giờ (8:00–15:00, T2–T6).")
+
+
+async def unsubscribe(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET is_active = FALSE WHERE chat_id = $1", user.id
+        )
+    await update.message.reply_text("Đã tắt cập nhật. Gõ /subscribe để bật lại.")
+
+
+async def pause(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET is_paused = TRUE WHERE chat_id = $1", user.id
+        )
+    await update.message.reply_text("Đã tạm dừng cập nhật. Gõ /resume để tiếp tục.")
+
+
+async def resume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET is_paused = FALSE WHERE chat_id = $1", user.id
+        )
+    await update.message.reply_text("Đã tiếp tục nhận cập nhật hàng giờ.")
+
+
+async def watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT ticker FROM watchlist WHERE chat_id = $1 ORDER BY ticker", user.id
+        )
+
+    if not rows:
+        await update.message.reply_text("Danh mục theo dõi trống. Dùng /add [TICKER] để thêm.")
+        return
+
+    tickers = [r["ticker"] for r in rows]
+    await update.message.reply_text(
+        f"Danh mục theo dõi ({len(tickers)} cổ phiếu):\n" + "  ".join(tickers)
+    )
+
+
+async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /add [TICKER] — ví dụ: /add HPG")
+        return
+
+    ticker = context.args[0].upper()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT COUNT(*) FROM subscribers WHERE chat_id = $1", user.id
+        )
+        if not existing:
+            await _ensure_subscriber(user.id, user.username, user.first_name)
+
+        result = await conn.execute(
+            "INSERT INTO watchlist (chat_id, ticker) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            user.id, ticker,
+        )
+
+    if result == "INSERT 0 1":
+        await update.message.reply_text(f"Đã thêm {ticker} vào danh mục theo dõi.")
+    else:
+        await update.message.reply_text(f"{ticker} đã có trong danh mục.")
+
+
+async def remove_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /remove [TICKER] — ví dụ: /remove HPG")
+        return
+
+    ticker = context.args[0].upper()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM watchlist WHERE chat_id = $1 AND ticker = $2", user.id, ticker
+        )
+
+    if result == "DELETE 1":
+        await update.message.reply_text(f"Đã xóa {ticker} khỏi danh mục theo dõi.")
+    else:
+        await update.message.reply_text(f"{ticker} không có trong danh mục.")
+
+
+async def set_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /setportfolio [số tiền] — ví dụ: /setportfolio 100000000")
+        return
+
+    try:
+        amount = int(context.args[0].replace(",", "").replace(".", ""))
+    except ValueError:
+        await update.message.reply_text("Số tiền không hợp lệ. Nhập số nguyên VNĐ.")
+        return
+
+    await _ensure_subscriber(user.id, user.username, user.first_name)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE subscribers SET portfolio_value = $1 WHERE chat_id = $2", amount, user.id
+        )
+    await update.message.reply_text(
+        f"Đã cập nhật giá trị danh mục: {amount:,.0f} VNĐ\n"
+        f"Mỗi lệnh gợi ý tối đa 15% = {amount * 0.15:,.0f} VNĐ"
+    )
+
+
+async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if len(context.args) < 2:
+        await update.message.reply_text("Cú pháp: /buy [TICKER] [GIÁ] — ví dụ: /buy HPG 25000")
+        return
+
+    ticker = context.args[0].upper()
+    try:
+        price = float(context.args[1].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("Giá không hợp lệ.")
+        return
+
+    await _ensure_subscriber(user.id, user.username, user.first_name)
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO entry_prices (chat_id, ticker, entry_price)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (chat_id, ticker) DO UPDATE SET entry_price = $3, is_active = TRUE, created_at = NOW()
+            """,
+            user.id, ticker, price,
+        )
+
+    stop_loss = price * 0.95
+    trailing = price * 1.03
+    await update.message.reply_text(
+        f"Đã ghi nhận lệnh mua {ticker} @ {price:,.0f} VNĐ\n\n"
+        f"Stop-loss cứng: {stop_loss:,.0f} VNĐ (-5%)\n"
+        f"Trailing stop kích hoạt tại: {trailing:,.0f} VNĐ (+3%)\n\n"
+        "Bot sẽ theo dõi và cảnh báo nếu có tín hiệu thoát lệnh."
+    )
+
+
+async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user = update.effective_user
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /sell [TICKER] — ví dụ: /sell HPG")
+        return
+
+    ticker = context.args[0].upper()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE entry_prices SET is_active = FALSE WHERE chat_id = $1 AND ticker = $2 AND is_active = TRUE",
+            user.id, ticker,
+        )
+
+    if result == "UPDATE 1":
+        await update.message.reply_text(f"Đã đóng vị thế {ticker}. Bot ngừng theo dõi thoát lệnh cho cổ phiếu này.")
+    else:
+        await update.message.reply_text(f"Không tìm thấy vị thế đang mở cho {ticker}.")
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "📖 HƯỚNG DẪN SỬ DỤNG BOT\n"
+        "─────────────────────────────\n\n"
+        "Theo dõi thị trường:\n"
+        "/subscribe — Bật nhận cập nhật hàng giờ (T2-T6, 8:00-15:00)\n"
+        "/unsubscribe — Tắt cập nhật\n"
+        "/pause — Tạm dừng cập nhật\n"
+        "/resume — Tiếp tục cập nhật\n\n"
+        "Quản lý danh mục:\n"
+        "/watchlist — Xem danh sách cổ phiếu đang theo dõi\n"
+        "/add [TICKER] — Thêm cổ phiếu vào danh mục\n"
+        "/remove [TICKER] — Xóa cổ phiếu khỏi danh mục\n"
+        "/setportfolio [số tiền] — Cài giá trị danh mục (VND)\n\n"
+        "Quản lý vị thế:\n"
+        "/buy [TICKER] [GIA] — Ghi nhận lệnh mua để theo dõi thoát lệnh\n"
+        "/sell [TICKER] — Đóng vị thế, ngừng theo dõi thoát lệnh\n\n"
+        "Phân tích:\n"
+        "/check [TICKER] — Phân tích ngay một cổ phiếu (kỹ thuật + AI)\n\n"
+        "─────────────────────────────\n"
+        "⚠️ TUYÊN BỐ MIỄN TRỪ TRÁCH NHIỆM\n"
+        "Bot này chỉ cung cấp thông tin tham khảo dựa trên phân tích kỹ thuật và AI. "
+        "Đây KHÔNG phải lời khuyên đầu tư tài chính. "
+        "Mọi quyết định mua/bán đều do bạn tự chịu trách nhiệm."
+    )
+
+
+async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not context.args:
+        await update.message.reply_text("Cú pháp: /check [TICKER] — ví dụ: /check HPG")
+        return
+
+    ticker = context.args[0].upper()
+    await update.message.reply_text(f"Đang phân tích {ticker}...")
+
+    from src.scraper.cafef import fetch_ticker_news, fetch_macro_news
+    from src.scraper.macro import fetch_global_macro
+    from src.engine.technical import compute_daily_signals
+    from src.engine.sentiment import analyze_sentiment
+    from src.engine.decision import check_buy_signal, format_buy_message, format_watchlist_status
+
+    user = update.effective_user
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        portfolio_value = await conn.fetchval(
+            "SELECT portfolio_value FROM subscribers WHERE chat_id = $1", user.id
+        ) or 0
+
+    technical = await compute_daily_signals(ticker)
+    if technical is None:
+        await update.message.reply_text(f"Không đủ dữ liệu cho {ticker}. Kiểm tra lại mã cổ phiếu.")
+        return
+
+    ticker_news, macro_news, macro_data = await asyncio.gather(
+        fetch_ticker_news(ticker),
+        fetch_macro_news(),
+        fetch_global_macro(),
+    )
+
+    sentiment = await analyze_sentiment(ticker, ticker_news, macro_news, macro_data)
+    conditions = check_buy_signal(technical, sentiment)
+
+    status = format_watchlist_status(ticker, technical, sentiment, conditions)
+    await update.message.reply_text(status, parse_mode="Markdown")
+
+    if conditions["signal"] and portfolio_value > 0:
+        msg = format_buy_message(ticker, technical, sentiment, conditions, portfolio_value)
+        await update.message.reply_text(msg)

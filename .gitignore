@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Database
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Docker
+*.log

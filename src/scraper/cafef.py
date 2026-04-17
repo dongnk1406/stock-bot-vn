@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio
 import logging
+from urllib.parse import quote
 import httpx
 from bs4 import BeautifulSoup
 
@@ -50,7 +51,7 @@ def _parse_articles(html: str, source: str, limit: int) -> list[dict]:
 
 
 async def fetch_ticker_news(ticker: str, limit: int = 5) -> list[dict]:
-    html = await _get(f"https://cafef.vn/tim-kiem.chn?keywords={ticker}")
+    html = await _get(f"https://cafef.vn/tim-kiem.chn?keywords={quote(ticker, safe='')}")
     if not html:
         return []
     articles = _parse_articles(html, "CafeF", limit)

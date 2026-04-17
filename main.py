@@ -44,6 +44,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _HEALTH_PORT = int(os.environ.get("PORT", 8080))
+_HEALTH_HOST = os.environ.get("HEALTH_HOST", "0.0.0.0")
 _RENDER_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 
@@ -58,7 +59,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 def _start_health_server():
-    server = HTTPServer(("0.0.0.0", _HEALTH_PORT), _HealthHandler)
+    server = HTTPServer((_HEALTH_HOST, _HEALTH_PORT), _HealthHandler)
     server.serve_forever()
 
 

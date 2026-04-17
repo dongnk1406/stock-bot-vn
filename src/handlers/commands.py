@@ -1,9 +1,17 @@
 from __future__ import annotations
 import asyncio
+import re
 from telegram import Update
 from telegram.ext import ContextTypes
 from src.models.database import get_pool
 from src.config import VN30_TICKERS
+
+_TICKER_RE = re.compile(r'^[A-Z0-9]{1,10}$')
+_MAX_PORTFOLIO = 10 ** 15
+
+
+def _valid_ticker(ticker: str) -> bool:
+    return bool(_TICKER_RE.match(ticker))
 
 
 async def _ensure_subscriber(chat_id: int, username: str, first_name: str) -> None:
@@ -137,6 +145,9 @@ async def add_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     ticker = context.args[0].upper()
+    if not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     pool = await get_pool()
     async with pool.acquire() as conn:
         existing = await conn.fetchval(
@@ -163,6 +174,9 @@ async def remove_ticker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
 
     ticker = context.args[0].upper()
+    if not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -187,6 +201,10 @@ async def set_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text("Số tiền không hợp lệ. Nhập số nguyên VNĐ.")
         return
 
+    if amount <= 0 or amount > _MAX_PORTFOLIO:
+        await update.message.reply_text("Giá trị danh mục ngoài khoảng cho phép.")
+        return
+
     await _ensure_subscriber(user.id, user.username, user.first_name)
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -206,6 +224,9 @@ async def buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     ticker = context.args[0].upper()
+    if not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     try:
         price = float(context.args[1].replace(",", ""))
     except ValueError:
@@ -241,6 +262,9 @@ async def sell(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     ticker = context.args[0].upper()
+    if not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     pool = await get_pool()
     async with pool.acquire() as conn:
         result = await conn.execute(
@@ -321,6 +345,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ticker = context.args[0].upper() if context.args else None
+    if ticker and not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     await update.message.reply_text(
         f"Đang lấy tin tức {'cho ' + ticker if ticker else 'vĩ mô'}..."
     )
@@ -394,6 +421,9 @@ async def check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     ticker = context.args[0].upper()
+    if not _valid_ticker(ticker):
+        await update.message.reply_text("Mã cổ phiếu không hợp lệ.")
+        return
     await update.message.reply_text(f"Đang phân tích {ticker}...")
 
     from datetime import datetime
